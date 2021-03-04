@@ -14,7 +14,7 @@ RDS → S3 → Glue (Crawler) → Athena
 
 More detailed diagram of the setup  is shown below:
 
-
+![architecture](architecture.png)
 
 1. First step is to have a ready snapshot of your RDS data. You can setup your RDS cluster to perform an automated (also called “system”) snapshot taken every night. 
 
@@ -40,9 +40,8 @@ More detailed diagram of the setup  is shown below:
 
 5. In order to be able to encrypt / decrypt the data, we need to set up a KMS key that will be used by the resources described above (RDS, S3, Lambda and Glue).
 
-6. In order to allow the AWS services to access the needed resources, we need to set up a separate IAM role for each. 
-
+6. In order to allow the AWS services to access the needed resources, we need to set up a separate IAM role for each.
  
-Refer to the CloudFormation template below for exact information about the necessary services.
+Refer to the CloudFormation [template](cf_template.yaml) for exact information about the necessary services.
 
 

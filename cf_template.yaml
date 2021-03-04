@@ -1,0 +1,357 @@
+---
+Parameters:
+  RdsCluster:
+    Type: String
+    Description: The identifier of the RDS cluster
+
+Resources:
+
+  ##################   IAM Roles   ##################
+
+  IamRoleForExportJob:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM Role for the export job, triggered by ExportJobLambda.
+      RoleName: rds-export-job-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: export.rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName:  iam-policy-for-export-job
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - s3:PutObject*
+                  - s3:ListBucket
+                  - s3:GetObject*
+                  - s3:DeleteObject*
+                  - s3:GetBucketLocation
+                Resource:
+                  - arn:aws:s3:::rds-snapshot-export
+                  - arn:aws:s3:::rds-snapshot-export/*
+                Effect: Allow
+
+  IamRoleForExportJobLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM Role for ExportJobLambda.
+      RoleName: rds-export-job-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: rds-export-job-lambda-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusterSnapshots
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBSnapshots
+                  - rds:DescribeExportTasks
+                  - rds:StartExportTask
+                Resource: "*"
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/rds-export-job-role
+
+  IamRoleForRunCrawlerLambda:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM Role for RunCrawlerLambda.
+      RoleName: rds-export-job-run-crawler-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: rds-export-job-run-crawler-lambda-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion"
+                Resource:
+                  - arn:aws:s3:::rds-snapshot-export
+                  - arn:aws:s3:::rds-snapshot-export/*
+              - Effect: Allow
+                Action:
+                  - glue:StartCrawler
+                Resource: "*"
+
+  IamRoleForGlueCrawlerS3ToAthena:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM Role for GlueCrawlerS3ToAthena.
+      RoleName: rds-export-crawler-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: rds-export-crawler-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: arn:aws:s3:::rds-snapshot-export/rds-snapshot-export/*
+
+
+  ##################   KMS   ##################
+
+  ExportJobKmsKey:
+    Type: AWS::KMS::Key
+    DependsOn:
+      - IamRoleForExportJob
+      - IamRoleForExportJobLambda
+      - IamRoleForRunCrawlerLambda
+      - IamRoleForGlueCrawlerS3ToAthena
+    Properties:
+      Description: Key used for RDS Snapshot Export to S3
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable Permissions For User
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/engineer
+            Action: kms:*
+            Resource: '*'
+          - Sid: Enable Permissions For RDS Snapshot Export Job
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt IamRoleForExportJob.Arn
+            Action: kms:*
+            Resource: '*'
+          - Sid: Enable Permissions For Export Lambda
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt IamRoleForExportJobLambda.Arn
+            Action: kms:*
+            Resource: '*'
+          - Sid: Enable Permissions For Crawler Lambda
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt IamRoleForRunCrawlerLambda.Arn
+            Action: kms:*
+            Resource: '*'
+          - Sid: Enable Permissions For Glue Crawler
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt IamRoleForGlueCrawlerS3ToAthena.Arn
+            Action: kms:*
+            Resource: '*'
+
+  ExportJobKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/rds-snapshot-export-key
+      TargetKeyId:
+        Ref: ExportJobKmsKey
+
+
+  ##################   RDS Export   ##################
+
+  ExportJobS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !GetAtt ExportJobKmsKey.Arn
+      BucketName: rds-snapshot-export
+
+  ##################   Lambdas   ##################
+
+  ExportJobLambda:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - IamRoleForExportJob
+      - IamRoleForExportJobLambda
+      - ExportJobKmsKey
+    Properties:
+      FunctionName: rds-export-job-lambda
+      Description: Lambda that triggers the RDS snapshot export job to S3.
+      Runtime: python3.6
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: !Sub |
+          import json
+          import os
+          import boto3
+          from datetime import datetime
+          def lambda_handler(event, context):
+              client = boto3.client("rds")
+              date = datetime.today().strftime('%Y-%m-%d')
+              export_task_id = f"rds-snapshot-export-{date}"
+              snapshots = client.describe_db_cluster_snapshots(
+                  DBClusterIdentifier="${RdsCluster}",
+                  SnapshotType="automated",
+                  MaxRecords=20 # lowest possible
+              )['DBClusterSnapshots']
+              latest_snapshot = sorted(snapshots, key=lambda s: s["SnapshotCreateTime"], reverse=True)[0]
+              latest_snapshot_id = latest_snapshot["DBClusterSnapshotIdentifier"]
+              source = f"arn:aws:rds:${AWS::Region}:${AWS::AccountId}:cluster-snapshot:{latest_snapshot_id}"
+              s3_bucket = "rds-snapshot-export"
+              iam_role = "${IamRoleForExportJob.Arn}"
+              kms_key = "${ExportJobKmsKey.Arn}"
+              response = client.start_export_task(
+                  ExportTaskIdentifier=export_task_id,
+                  SourceArn=source,
+                  S3BucketName=s3_bucket,
+                  IamRoleArn=iam_role,
+                  KmsKeyId=kms_key
+              )
+              return json.dumps(response, default=str)
+      Role: !GetAtt IamRoleForExportJobLambda.Arn
+
+  ExportJobPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - ExportJobLambda
+      - EventBridgeExportJobRule
+    Properties:
+      FunctionName: rds-export-job-lambda
+      Principal: events.amazonaws.com
+      Action: lambda:InvokeFunction
+      SourceArn: !GetAtt EventBridgeExportJobRule.Arn
+
+  RunCrawlerLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: IamRoleForRunCrawlerLambda
+    Properties:
+      FunctionName: rds-export-job-run-crawler-lambda
+      Description: Lambda that copies the RDS exported data from the daily folder to the main folder (overwriting previous data) and triggers the crawler (see GlueCrawlerS3ToAthena).
+      Runtime: python3.6
+      Handler: index.lambda_handler
+      Timeout: 60 # in seconds; copying and crawling might take a while
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          from datetime import datetime
+          def lambda_handler(event, context):
+              s3 = boto3.resource('s3')
+              date = datetime.today().strftime('%Y-%m-%d')
+              bucket_name = 'rds-snapshot-export'
+              old_folder = f'rds-snapshot-export-{date}/'
+              new_folder = 'rds-snapshot-export/'
+              for obj in s3.Bucket(bucket_name).objects.filter(Prefix=old_folder):
+                  old_source = { 'Bucket': bucket_name,  'Key': obj.key }
+                  new_key = obj.key.replace(old_folder, new_folder, 1)
+                  s3.Object(bucket_name, new_key).copy_from(CopySource = old_source)
+                  s3.Object(bucket_name, obj.key).delete()
+              glue_client = boto3.client('glue', region_name='${AWS::Region}')
+              glue_client.start_crawler(Name='rds-export-crawler')
+              return json.dumps(response, default=str)
+
+      Role: !GetAtt IamRoleForRunCrawlerLambda.Arn
+
+  RunCrawlerPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: RunCrawlerLambda
+    Properties:
+      FunctionName: rds-export-job-run-crawler-lambda
+      Principal: events.amazonaws.com
+      Action: lambda:InvokeFunction
+      SourceArn: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/rds-export-job-run-crawler-rule
+
+
+  ##################   EventBridge   ##################
+
+  EventBridgeExportJobRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Rule for triggering the rds-snapshot-export-to-s3 lambda.
+      EventBusName: default
+      EventPattern:
+        source:
+          - "aws.rds"
+        detail-type:
+          - "RDS DB Cluster Snapshot Event"
+        detail:
+          SourceIdentifier:
+            - prefix: !Sub rds:${RdsCluster}
+          Message:
+            - "Automated cluster snapshot created"
+      Name: rds-export-job-trigger-rule
+      Targets:
+        - Arn: !GetAtt ExportJobLambda.Arn
+          Id: rds-export-job-lambda
+
+  EventBridgeRunCrawlerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Rule for triggering rds-export-job-run-crawler-lambda.
+      EventBusName: default
+      EventPattern:
+        source:
+          - "aws.rds"
+        detail-type:
+          - "RDS DB Cluster Snapshot Event"
+        detail:
+          SourceIdentifier:
+            - prefix: !Sub rds:${RdsCluster}
+          Message:
+            - "Export task completed"
+      Name: rds-export-job-run-crawler-rule
+      Targets:
+        - Arn: !GetAtt RunCrawlerLambda.Arn
+          Id: rds-export-job-run-crawler-lambda
+
+
+  ##################   Glue + Athena   ##################
+
+  GlueCrawlerS3ToAthenaDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Sub ${AWS::AccountId}
+      DatabaseInput:
+        Name: exported_rds
+        Description: Database that contains data exported from RDS into S3 and loaded via AWS Glue crawler.
+
+  GlueCrawlerS3ToAthena:
+    Type: AWS::Glue::Crawler
+    DependsOn:
+      - IamRoleForGlueCrawlerS3ToAthena
+      - GlueCrawlerS3ToAthenaDatabase
+    Properties:
+      Name: rds-export-crawler
+      Description: AWS Glue Crawler for importing RDS snapshot (stored in S3) into Athena.
+      DatabaseName: exported_rds
+      Role: !GetAtt IamRoleForGlueCrawlerS3ToAthena.Arn
+      Targets:
+        S3Targets:
+          - Path: s3://rds-snapshot-export/rds-snapshot-export/
