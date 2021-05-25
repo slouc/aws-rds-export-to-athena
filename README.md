@@ -1,6 +1,6 @@
 # AWS RDS Snapshot export to AWS Athena
 
-This document describes a setup for loading AWS RDS snapshot data into AWS Athena.
+This document describes my setup for loading AWS RDS snapshot data into AWS Athena, successfully used on a production system.
 
 ## Overview
 
